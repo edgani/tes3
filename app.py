@@ -17,6 +17,7 @@ import data as D
 import regime as R
 import ranking as RK
 import secular_map as BN
+import funding_stress as FS
 from lpm import lpm_features, money_flow
 
 
@@ -34,6 +35,10 @@ def _cmf(df, n=20):
 def compute(us_prices, idx_prices):
     out = {}
     reg = R.assess(us_prices, D.US_UNIVERSE)
+    fund = FS.assess()
+    out["funding"] = fund
+    if fund.get("crash_nudge"):            # acute funding stress overrides toward defensive
+        reg["posture"] = "Defensive"; reg["defensive"] = True
     out["regime"] = reg
     rows = RK.compute_rows(us_prices, reg, D.US_UNIVERSE)
     out["rows"] = rows
@@ -165,6 +170,17 @@ def render_command_center(d, source):
                + _tile("Posture", reg["posture"][:4], reg["posture"], "red" if reg["defensive"] else "grn"))
     dmax = _dmax(d)
     cards = "".join(_conv_card(r, dmax) for r in d["conviction"])
+    fnd = d.get("funding", {})
+    fcol = {"stress": "red", "easing": "grn", "neutral": "amb"}.get(fnd.get("label"), "amb")
+    fund_html = (f"<div class='wr-lbl'>Liquidity &amp; funding — EFFR engine ({fnd.get('source','')})</div>"
+                 f"<div class='wr-card'><div class='wr-ctop'>"
+                 f"<span class='wr-tkr' style='font-size:13px;'>Funding stress {fnd.get('score','—')}/100</span>"
+                 f"<div style='margin-left:auto;'>{_badge(fnd.get('label','—'), fcol)}</div></div>"
+                 f"<div class='wr-why'><span class='k'>EFFR</span> {fnd.get('effr','—')} · "
+                 f"dev {fnd.get('dev_bps','—')}bps vs ceiling · EFFR–SOFR {fnd.get('spread_bps','—')}bps · "
+                 f"{', '.join(fnd.get('signals', []))}."
+                 + (" <span class='k'>Bottom unconfirmed until funding eases.</span>" if fnd.get("bottom_block") else "")
+                 + "</div></div>")
     html = (f"<div class='wr-top'><b>War room</b><span>Command center</span></div>"
             f"<div class='wr-pills'>{pills}</div>"
             f"<div class='wr-hero'><div class='wr-herotop'>"
@@ -179,6 +195,7 @@ def render_command_center(d, source):
             f"<div style='margin-top:12px;padding-top:11px;border-top:0.5px solid #1b212a;' class='wr-sub'>"
             f"Δ: {reg['posture']} — growth accel {g:+.1f}, inflation accel {i:+.1f}, breadth {b}%</div></div>"
             f"<div class='wr-lbl'>Why — regime drivers (GIP acceleration)</div><div class='wr-grid'>{drivers}</div>"
+            f"{fund_html}"
             f"<div class='wr-lbl'>What to do — highest conviction</div>{cards}"
             f"<div class='wr-note'>Data: {source} · risk range = Hedgeye RV-based (σ×√n×basis) · GIP from price proxies · not advice.</div>")
     st.markdown(CSS + html, unsafe_allow_html=True)

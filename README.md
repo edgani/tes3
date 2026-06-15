@@ -18,7 +18,8 @@ yfinance live; synthetic fallback so it always renders (flagged in the header no
 - risk_range.py .... Hedgeye RV risk range  width = basis · σ_daily · √n  (TRADE/TREND/TAIL)
 - ranking.py ....... competitive conviction (RS / momentum / formation / crowding / accumulation)
 - lpm.py ........... value-based Liquidity Pressure Model (fixed) + calibrate_lpm.py
-- bottleneck.py .... curated secular/supplier map from your attachments
+- funding_stress.py  EFFR/SOFR/RRP/reserves funding-stress score (FRED; deviation-based)
+- secular_map.py ... curated secular/supplier map from your attachments
 
 ## Tabs
 Command Center · Alpha Center · US Stocks · IHSG Bandar · Market State · Bottleneck & Moonshot
