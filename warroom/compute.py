@@ -145,7 +145,7 @@ def _verdict(setups):
     return "Mixed", "amb"
 
 
-def _setups(prices, bench_t=None, names=None, n=8):
+def _setups(prices, bench_t=None, names=None, n=8, long_only=False):
     bench = prices.get(bench_t) if bench_t else None
     bm = (lambda k: _ret(bench["Close"], k)) if (bench is not None and len(bench) > 70) else (lambda k: 0.0)
     rows = []
@@ -154,11 +154,13 @@ def _setups(prices, bench_t=None, names=None, n=8):
         if d is None or len(d) < 80 or t == bench_t:
             continue
         c = d["Close"]
-        rs = _ret(c, 63) - bm(63); mom = _ret(c, 63)
+        rs = _ret(c, 63) - bm(63); mom = _ret(c, 63); acc = _ret(c, 21) - _ret(c, 63)
         sma20, sma50 = float(c.tail(20).mean()), float(c.tail(50).mean())
         above50, trend = c.iloc[-1] / sma50 - 1, sma20 / sma50 - 1
         form = "BULLISH" if (trend > 0 and above50 > 0) else "BEARISH" if (trend < 0 and above50 < 0) else "NEUTRAL"
         direction = "Long" if (form == "BULLISH" and rs > 0) else "Short" if (form == "BEARISH" and rs < 0) else "Watch"
+        if long_only and direction == "Short":
+            direction = "Watch"
         rr = _try(lambda: _rr(d, t))
         if rr and isinstance(rr, dict) and "trade" in rr:
             tl, th = rr["trade"]["lrr"], rr["trade"]["trr"]
@@ -180,7 +182,7 @@ def _setups(prices, bench_t=None, names=None, n=8):
             stop, target, entry = None, None, f"{tl}–{th}"
         strength = abs(rs) * 2.2 + abs(mom) + abs(above50) * 0.7
         rows.append({"ticker": t, "_dir": direction, "px": px, "entry": entry, "stop": stop, "target": target,
-                     "rs": round(rs * 100, 1), "form": form, "score": round(max(strength, 0) * 10, 1)})
+                     "rs": round(rs * 100, 1), "accel": round(acc * 100, 1), "form": form, "score": round(max(strength, 0) * 10, 1)})
     rows.sort(key=lambda x: (x["_dir"] != "Watch", x["score"]), reverse=True)
     return rows[:n]
 
@@ -207,8 +209,13 @@ def _us_lens(us):
 
 def _crypto_lens(cp):
     setups = _setups(cp, "BTC-USD", list(cp), 6)
+    btc, eth, sol = cp.get("BTC-USD"), cp.get("ETH-USD"), cp.get("SOL-USD")
+    dom = None
+    if btc is not None and eth is not None:
+        alt = _ret(eth["Close"], 30) + (_ret(sol["Close"], 30) if sol is not None else _ret(eth["Close"], 30))
+        dom = round((_ret(btc["Close"], 30) * 2 - alt) * 100, 1)
     v, vc = _verdict(setups)
-    return {"setups": setups, "verdict": v, "vcolor": vc}
+    return {"setups": setups, "btc_dom": dom, "verdict": v, "vcolor": vc}
 
 
 def _commo_lens(commo, us):
@@ -226,11 +233,13 @@ def _commo_lens(commo, us):
 
 
 def _fx_lens(fx):
+    dxy = fx.get("DX-Y.NYB")
+    dt = ("rising" if dxy is not None and dxy["Close"].iloc[-1] > dxy["Close"].tail(50).mean() else "falling") if dxy is not None else None
     setups = _setups(fx, "DX-Y.NYB", list(fx), 6)
     for s in setups:
         s["ticker"] = s["ticker"].replace("=X", "").replace("DX-Y.NYB", "DXY")
     v, vc = _verdict(setups)
-    return {"setups": setups, "verdict": v, "vcolor": vc}
+    return {"setups": setups, "dxy_trend": dt, "verdict": v, "vcolor": vc}
 
 
 def _idx_flow(idx):
@@ -240,10 +249,15 @@ def _idx_flow(idx):
             lf = lpm_features(df, scaling="value_typical", span=20)
             adl = money_flow(df, "value_typical").cumsum()
             rising = bool(adl.iloc[-1] > adl.iloc[-min(21, len(adl))])
-            rows.append({"ticker": t, "state": lf.get("state"), "lpm": lf.get("lpm"), "adl_rising": rising})
+            stage = _try(lambda: __import__("gcfis.engines.accumulation", fromlist=["run_accumulation"]).run_accumulation(
+                t, df["Close"], df["Close"], df["Volume"], None, None, None, None, None, False))
+            slbl = None
+            if isinstance(stage, dict):
+                slbl = stage.get("stage") or stage.get("adoption_stage") or stage.get("label")
+            rows.append({"ticker": t, "state": lf.get("state"), "lpm": lf.get("lpm"), "adl_rising": rising, "stage": slbl})
         except Exception:
             continue
-    setups = _setups(idx, None, list(idx), 8)
+    setups = _setups(idx, None, list(idx), 8, long_only=True)   # IDX has no short
     acc = sum(1 for r in rows if r.get("state") == "accumulation")
     v = ("Accumulation" if acc > len(rows) / 2 else "Distribution" if acc < len(rows) / 3 else "Mixed")
     vc = "grn" if v == "Accumulation" else "red" if v == "Distribution" else "amb"
@@ -309,9 +323,23 @@ def run(us, idx, crypto, fx, commo, fred=None):
     out["forward"] = _forward_macro(us)
     out["crash"] = _crash(us, vix)
     out["discovery"] = _discovery(us, vix)
+    # CROSS-MARKET competitive ranking (vision: best across ALL markets, not US-only)
+    pool = []
+    for mkt, key in [("US", "us_lens"), ("Crypto", "crypto"), ("Commodities", "commo"), ("FX", "fx"), ("IHSG", "idx")]:
+        for s in (out.get(key, {}).get("setups") or []):
+            if s["_dir"] in ("Long", "Short"):
+                s2 = dict(s); s2["market"] = mkt
+                s2["frameworks"] = out["methodology"].get(s["ticker"], []) if mkt == "US" else []
+                pool.append(s2)
+    pool.sort(key=lambda x: x["score"], reverse=True)
+    out["ranked"] = len(pool)
+    out["conviction"] = pool[:5]
+    out["watchlist"] = pool[5:14]
     dmax = max([r["score"] for r in out["conviction"]] or [1]) or 1
     for r in out["conviction"]:
         r["size"] = _sizing(10 * r["score"] / dmax, reg["structural"], vix)
+    out["xasset"] = _xasset(us, commo)
+    out["shock_prob"] = "elevated" if vix > 22 else "moderate" if vix > 17 else "low"
     # funding nudge
     if out["funding"].get("crash_nudge"):
         reg["posture"], reg["defensive"] = "Defensive", True
@@ -386,3 +414,18 @@ def _discovery(us, vix):
     elif isinstance(sq, list):
         sq_rows = [{"ticker": x.get("ticker"), "score": x.get("score")} for x in sq[:6] if isinstance(x, dict)]
     return {"squeeze": sq_rows, "bottleneck": bd, "asymmetric": am}
+
+
+def _xasset(us, commo):
+    """cross-asset coherence (validated engine; OHLCV-derived daily % changes)."""
+    def r(d, k=1):
+        return float(d["Close"].iloc[-1] / d["Close"].iloc[-1 - k] - 1) if d is not None and len(d) > k else 0.0
+    def pick(*dfs):
+        for x in dfs:
+            if x is not None:
+                return x
+        return None
+    snap = {"gold": r(pick(commo.get("GLD"), us.get("GLD"))), "silver": r(commo.get("SLV")),
+            "oil": r(pick(commo.get("USO"), us.get("USO"))), "spx": r(us.get("SPY")),
+            "dollar": r(us.get("UUP")), "bonds": r(us.get("TLT")), "vix": r(us.get("^VIX"))}
+    return _try(lambda: __import__("gcfis.engines.cross_asset", fromlist=["run_cross_asset"]).run_cross_asset(snap))

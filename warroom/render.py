@@ -112,6 +112,20 @@ def _setup_card(s):
             f"<div class='wr-why'>{levels}. <span class='k'>RS</span> {s['rs']:+.0f}% · {s['form'].lower()}.</div></div>")
 
 
+def _xcard(s, dmax):
+    disp = 10 * s.get("score", 0) / dmax if dmax else 0
+    k = _DIRK.get(s["_dir"], "inf")
+    lvl = (f"<span class='k'>entry</span> {s['entry']} · <span class='k'>stop</span> {s['stop']} · <span class='k'>target</span> {s['target']}"
+           if s["_dir"] in ("Long", "Short") else f"watch {s['entry']}")
+    fw = f" <span class='k'>· frameworks:</span> {', '.join(s['frameworks'][:4])}" if s.get("frameworks") else ""
+    sz = s.get("size"); szh = f" · size ~{sz['sized_bps']}bps" if sz else ""
+    return (f"<div class='wr-card'><div class='wr-ctop'>{_b(s['_dir'], k)}"
+            f"<span class='wr-tkr wr-mono'>{s['ticker']}</span>"
+            f"<span class='wr-badge b-gry'>{s.get('market','')}</span>"
+            f"<span class='wr-sub'>${s['px']}</span><span class='wr-score wr-mono'>{disp:.1f}</span></div>"
+            f"<div class='wr-why'>{lvl}. <span class='k'>RS</span> {s['rs']:+.0f}% · accel {s.get('accel',0):+.0f}% · {s['form'].lower()}{fw}{szh}.</div></div>")
+
+
 def _probrow(probs):
     if not probs:
         return "<span class='wr-note'>quad probabilities need FRED (live on your machine).</span>"
@@ -137,11 +151,12 @@ def command_center(d, source):
     drivers = (_tile("Growth (struct)", f"{gs:+.1f}", ("↓ Slowing" if gs < 0 else "↑ Rising"), "red" if gs < 0 else "grn")
                + _tile("Inflation (struct)", f"{isr:+.1f}", ("↑ Rising" if isr > 0 else "↓ Easing"), "amb" if isr > 0 else "grn")
                + _tile("Liquidity / funding", f"{fscore}", flab, {"stress": "red", "easing": "grn"}.get(flab, "amb"))
+               + _tile("Shock prob", d.get("shock_prob", "—"), "VIX-based", {"elevated": "red", "moderate": "amb"}.get(d.get("shock_prob"), "grn"))
                + _tile("Breadth", f"{b}%", ("↓ <50d" if b < 50 else "↑ healthy"), "red" if b < 50 else "grn")
                + _tile("Bullish", d["market"]["bull"], "formations", "grn")
                + _tile("Bearish", d["market"]["bear"], "formations", "red"))
     dmax = _dmax(d)
-    cards = "".join(_conv_card(r, dmax, reg) for r in d["conviction"])
+    cards = "".join(_xcard(r, dmax) for r in d["conviction"])
     bits = []
     if d.get("hmm"): bits.append(f"<span class='k'>HMM regime:</span> {_short(d['hmm'],40)}")
     if d.get("forward") is not None: bits.append(f"<span class='k'>Forward macro:</span> {_short(d['forward'],60)}")
@@ -164,6 +179,8 @@ def command_center(d, source):
         nodes = ["GPU compute", "Networking", "Power / grid", "Cooling / photonics"]; ncls = ["n-src", "n-src", "n-amb", "n-red"]
         chain = "<span class='wr-sub'>→</span>".join(f"<span class='wr-node {ncls[j]}'>{n}</span>" for j, n in enumerate(nodes))
         chsrc = "bottleneck migration (Citrini / Aschenbrenner)"
+    xa = d.get("xasset")
+    xa_html = f"<div class='wr-note' style='margin-top:6px;'><span class='k'>Cross-asset coherence:</span> {_short(xa, 90)}</div>" if xa else ""
     html = (f"<div class='wr-top'><b>War room</b><span>Command center</span></div>"
             f"<div class='wr-hero'><div class='wr-herotop'>"
             f"<div><div class='wr-tk'>Regime — US equities · {reg.get('source','')}</div>"
@@ -183,85 +200,112 @@ def command_center(d, source):
             f"<div class='wr-lbl'>What to do — highest conviction</div>{cards}"
             f"<div class='wr-lbl'>The edge — propagation</div><div class='wr-chain'>"
             f"<div style='display:flex;align-items:center;gap:6px;flex-wrap:wrap;'>{chain}</div>"
-            f"<div class='wr-note' style='margin-top:8px;'>{chsrc}.</div></div>"
+            f"<div class='wr-note' style='margin-top:8px;'>{chsrc}. 2nd-order tell: cooling / optical lag semis ~2–3 weeks — watch VRT/COHR after a SMH move.</div>"
+            f"{xa_html}</div>"
             f"<div class='wr-note'>Data: {source} · GIP {reg.get('source','')} · risk range = Hedgeye TRADE/TREND/TAIL · not advice.</div>")
     st.markdown(CSS + html, unsafe_allow_html=True)
 
 
 def alpha(d):
-    dmax = _dmax(d); reg = d["regime"]; meth = d.get("methodology", {})
-    funnel = (_tile("Scanned", d["scanned"]) + _tile("Ranked", len(d["rows"]))
+    dmax = _dmax(d)
+    funnel = (_tile("Scanned", d["scanned"]) + _tile("Ranked", d.get("ranked", 0))
               + _tile("Conviction", len(d["conviction"])) + _tile("Watchlist", len(d["watchlist"])))
-    cards = ""
-    for r in d["conviction"]:
-        fw = meth.get(r["ticker"], [])
-        extra = f"<div class='wr-sub' style='margin-top:4px;'>frameworks: {', '.join(fw[:5])}</div>" if fw else ""
-        cards += _conv_card(r, dmax, reg, extra)
+    cards = "".join(_xcard(r, dmax) for r in d["conviction"]) or "<div class='wr-note'>no long/short setups.</div>"
     rows = ""
     for r in d["watchlist"]:
         disp = 10 * r.get("score", 0) / dmax if dmax else 0
-        rows += (f"<div class='wr-row'><span class='wr-mono' style='font-weight:600;min-width:56px;color:#e8edf2;'>{r['ticker']}</span>"
-                 f"{_b(r['_dir'], _DIRK.get(r['_dir'],'inf'))}<span class='wr-mono' style='color:#9aa6b2;'>{disp:.1f}</span>"
-                 f"<span style='color:#9aa6b2;'>RS {r.get('rs63',0):+.0f}% · accum {r.get('accumulation',0)}</span></div>")
-    html = (f"<div class='wr-top'><b>Alpha center</b><span>competitive ranking · my engine + methodology</span></div>"
-            f"<div class='wr-grid'>{funnel}</div><div class='wr-lbl'>Highest conviction</div>{cards}"
+        rows += (f"<div class='wr-row'><span class='wr-mono' style='font-weight:600;min-width:62px;color:#e8edf2;'>{r['ticker']}</span>"
+                 f"{_b(r['_dir'], _DIRK.get(r['_dir'],'inf'))}<span class='wr-badge b-gry'>{r.get('market','')}</span>"
+                 f"<span class='wr-mono' style='color:#9aa6b2;'>{disp:.1f}</span>"
+                 f"<span style='color:#9aa6b2;'>RS {r.get('rs',0):+.0f}% · entry {r.get('entry','')}</span></div>")
+    html = (f"<div class='wr-top'><b>Alpha center</b><span>cross-market competitive ranking</span></div>"
+            f"<div class='wr-grid'>{funnel}</div><div class='wr-lbl'>Highest conviction — best across all markets</div>{cards}"
             f"<div class='wr-lbl'>Watchlist</div><div class='wr-rows'>{rows}</div>")
     st.markdown(CSS + html, unsafe_allow_html=True)
-
 
 def _lens_rows(items, fmt):
     return "".join(fmt(r) for r in items) or "<div class='wr-row'><span class='wr-note'>feed needed for this lens.</span></div>"
 
 
+def _need(label, what):
+    return _tile(label, "—", "needs " + what, "sub")
+
+
 def us_stocks(d):
     L = d.get("us_lens", {}); setups = L.get("setups", []); gamma = L.get("gamma", [])
-    gtiles = "".join(_tile(g["ticker"], g["zero_g"], g["regime"], "red" if "short" in g["regime"] else "grn" if "long" in g["regime"] else "sub") for g in gamma)
+    g0 = gamma[0] if gamma else {}; reg0 = g0.get("regime", "—")
+    tiles = (_tile("Gamma regime", (reg0.split(" ")[0] + " γ" if g0 else "—"), "price/vol proxy", "red" if (g0 and "short" in reg0) else "grn" if g0 else "sub")
+             + _tile("Zero-gamma", g0.get("zero_g", "—"), "proxy SMA20", "sub")
+             + _tile("Realized vol", (f"{g0.get('rv','—')}%" if g0 else "—"), "20d annualized", "sub")
+             + _need("Net GEX", "options chain") + _need("Vanna / Charm", "options chain") + _need("Dark pool / P/C", "FINRA / options feed"))
+    grows = "".join(_tile(g["ticker"], g["zero_g"], g["regime"], "red" if "short" in g["regime"] else "grn" if "long" in g["regime"] else "sub") for g in gamma)
     cards = "".join(_setup_card(s) for s in setups) or "<div class='wr-note'>no setups.</div>"
-    html = (f"<div class='wr-top'><b>US stocks</b><span>gamma lens · actionable setups</span></div>"
+    html = (f"<div class='wr-top'><b>US stocks</b><span>gamma · vanna · charm · dark pool</span></div>"
             f"<div style='margin-bottom:14px;'>{_b('US · ' + L.get('verdict','—'), L.get('vcolor','amb'))}</div>"
-            f"<div class='wr-lbl'>Dealer gamma (price-proxy · zero-γ level)</div><div class='wr-grid'>{gtiles}</div>"
+            f"<div class='wr-lbl'>Dealer positioning</div><div class='wr-grid'>{tiles}</div>"
+            f"<div class='wr-lbl'>Per-name gamma (proxy)</div><div class='wr-grid'>{grows}</div>"
             f"<div class='wr-lbl'>Setups — entry / stop / target</div>{cards}"
-            f"<div class='wr-note'>Gamma = price/vol proxy (short γ → dealers amplify moves). Real signed GEX/vanna/charm via options chain (yfinance_options). Entry/stop/target from Hedgeye risk range.</div>")
-    st.markdown(CSS + html, unsafe_allow_html=True)
-
-
-def _lens_tab(d, key, title, sub, note):
-    L = d.get(key, {}); setups = L.get("setups", [])
-    cards = "".join(_setup_card(s) for s in setups) or "<div class='wr-note'>no setups in this universe.</div>"
-    extra = f"<div class='wr-note' style='margin:0 0 10px;'>Gold bias: {L['gold_bias']}.</div>" if L.get("gold_bias") else ""
-    html = (f"<div class='wr-top'><b>{title}</b><span>{sub}</span></div>"
-            f"<div style='margin-bottom:14px;'>{_b(title + ' · ' + L.get('verdict','—'), L.get('vcolor','amb'))}</div>"
-            f"{extra}<div class='wr-lbl'>Setups — entry / stop / target</div>{cards}"
-            f"<div class='wr-note'>{note}</div>")
+            f"<div class='wr-note'>No options feed wired → gamma is a price/vol proxy; Net GEX / vanna / charm / dark-pool need an options chain (yfinance_options) + FINRA. Entry/stop/target from Hedgeye risk range.</div>")
     st.markdown(CSS + html, unsafe_allow_html=True)
 
 
 def crypto(d):
-    _lens_tab(d, "crypto", "Crypto", "price + flow lens",
-              "On-chain (netflow/MVRV), funding & liquidation heat need a feed (defillama/exchange). Setups from trend/RS + Hedgeye risk range.")
+    L = d.get("crypto", {}); setups = L.get("setups", []); dom = L.get("btc_dom")
+    tiles = (_tile("BTC dominance", (f"{dom:+.0f}%" if dom is not None else "—"), "BTC vs alts 30d (proxy)", "amb" if dom is not None else "sub")
+             + _need("Funding", "perp feed") + _need("Stablecoin flow", "on-chain feed")
+             + _need("On-chain (MVRV)", "on-chain feed") + _need("Liquidation heat", "exchange feed"))
+    cards = "".join(_setup_card(s) for s in setups) or "<div class='wr-note'>no setups.</div>"
+    html = (f"<div class='wr-top'><b>Crypto</b><span>on-chain · funding · liquidation</span></div>"
+            f"<div style='margin-bottom:14px;'>{_b('Crypto · ' + L.get('verdict','—'), L.get('vcolor','amb'))}</div>"
+            f"<div class='wr-lbl'>Flow lens</div><div class='wr-grid'>{tiles}</div>"
+            f"<div class='wr-lbl'>Setups — entry / stop / target</div>{cards}"
+            f"<div class='wr-note'>On-chain / funding / liquidation need a feed (defillama / exchange / Deribit). BTC-dominance is a price proxy. Setups from trend/RS + risk range.</div>")
+    st.markdown(CSS + html, unsafe_allow_html=True)
 
 
 def commodities(d):
-    _lens_tab(d, "commo", "Commodities", "trend · curve lens",
-              "Curve shape / inventory / shipping need a futures feed. Setups from trend/RS + Hedgeye risk range.")
+    L = d.get("commo", {}); setups = L.get("setups", []); gb = L.get("gold_bias")
+    tiles = (_tile("Gold bias", gb or "—", "DXY × real-yield", "amb" if gb else "sub")
+             + _need("Curve shape", "futures feed") + _need("Inventory", "EIA / COT feed") + _need("Shipping", "freight feed"))
+    cards = "".join(_setup_card(s) for s in setups) or "<div class='wr-note'>no setups.</div>"
+    html = (f"<div class='wr-top'><b>Commodities</b><span>inventory · curve · shipping</span></div>"
+            f"<div style='margin-bottom:14px;'>{_b('Commodities · ' + L.get('verdict','—'), L.get('vcolor','amb'))}</div>"
+            f"<div class='wr-lbl'>Lens</div><div class='wr-grid'>{tiles}</div>"
+            f"<div class='wr-lbl'>Setups — entry / stop / target</div>{cards}"
+            f"<div class='wr-note'>Curve / inventory / shipping need a futures + COT feed. Setups from trend/RS + risk range.</div>")
+    st.markdown(CSS + html, unsafe_allow_html=True)
 
 
 def fx(d):
-    _lens_tab(d, "fx", "FX", "USD · trend lens",
-              "Carry / rate differentials need FRED rates (engine: fx_carry). Setups from trend/RS + Hedgeye risk range.")
+    L = d.get("fx", {}); setups = L.get("setups", []); dt = L.get("dxy_trend")
+    tiles = (_tile("DXY trend", dt or "—", "vs 50d", "red" if dt == "rising" else "grn" if dt == "falling" else "sub")
+             + _need("Carry", "FRED rates") + _need("Rate differential", "FRED 2y") + _need("Reserve flow", "COFER feed"))
+    cards = "".join(_setup_card(s) for s in setups) or "<div class='wr-note'>no setups.</div>"
+    html = (f"<div class='wr-top'><b>FX</b><span>carry · DXY · rate differential</span></div>"
+            f"<div style='margin-bottom:14px;'>{_b('FX · ' + L.get('verdict','—'), L.get('vcolor','amb'))}</div>"
+            f"<div class='wr-lbl'>Lens</div><div class='wr-grid'>{tiles}</div>"
+            f"<div class='wr-lbl'>Setups — entry / stop / target</div>{cards}"
+            f"<div class='wr-note'>Carry / rate-differential need FRED rates (engine: fx_carry). DXY trend computable. Setups from trend/RS + risk range.</div>")
+    st.markdown(CSS + html, unsafe_allow_html=True)
 
 
 def ihsg(d):
     L = d.get("idx", {}); rows = L.get("rows", []); setups = L.get("setups", [])
+    acc_n = sum(1 for r in rows if r.get("state") == "accumulation")
+    tiles = (_tile("Flow state", L.get("verdict", "—"), f"{acc_n}/{len(rows)} accumulating", L.get("vcolor", "amb"))
+             + _tile("LPM", "value-based", "A/D divergence", "sub")
+             + _need("Corr_F / Par_F", "broker Type-F") + _need("Flow regime", "broker Type-F") + _need("Broker entropy", "broker Type-F"))
     lpm_rows = "".join(f"<div class='wr-row'><span class='wr-mono' style='font-weight:600;min-width:78px;color:#e8edf2;'>{r['ticker']}</span>"
                        f"{_b(r.get('state','n/a'), {'accumulation':'grn','distribution':'red'}.get(r.get('state'),'amb'))}"
-                       f"<span class='wr-sub'>{'A/D ↑' if r.get('adl_rising') else 'A/D ↓'} · LPM {_fmt(r.get('lpm'),0)}</span></div>" for r in rows)
-    cards = "".join(_setup_card(s) for s in setups) or "<div class='wr-note'>no setups.</div>"
-    html = (f"<div class='wr-top'><b>IHSG</b><span>BandarMetrics · actionable setups</span></div>"
+                       + (f"<span class='wr-badge b-gry'>{r['stage']}</span>" if r.get('stage') else "")
+                       + f"<span class='wr-sub'>{'A/D ↑' if r.get('adl_rising') else 'A/D ↓'} · LPM {_fmt(r.get('lpm'),0)}</span></div>" for r in rows)
+    cards = "".join(_setup_card(s) for s in setups) or "<div class='wr-note'>no long setups right now.</div>"
+    html = (f"<div class='wr-top'><b>IHSG</b><span>BandarMetrics · long-only</span></div>"
             f"<div style='margin-bottom:14px;'>{_b('IHSG · ' + L.get('verdict','—'), L.get('vcolor','amb'))}</div>"
-            f"<div class='wr-lbl'>Accumulation / distribution (value-based LPM)</div><div class='wr-rows' style='margin-bottom:14px;'>{lpm_rows}</div>"
-            f"<div class='wr-lbl'>Setups — entry / stop / target</div>{cards}"
-            f"<div class='wr-note'>LPM value-based (calibrate_lpm.py). Foreign Flow / Corr_F / Par_F + flow regime need IDX broker Type-F data. Entry/stop from risk range.</div>")
+            f"<div class='wr-lbl'>Bandar lens</div><div class='wr-grid'>{tiles}</div>"
+            f"<div class='wr-lbl'>Accumulation / distribution (value-based LPM + adoption stage)</div><div class='wr-rows' style='margin-bottom:14px;'>{lpm_rows}</div>"
+            f"<div class='wr-lbl'>Setups — long-only (IDX has no short)</div>{cards}"
+            f"<div class='wr-note'>IDX is long-only — no short setups generated. LPM value-based + adoption stage (accumulation engine). Corr_F / Par_F / flow-regime / broker-entropy need IDX broker Type-F data (engines present: flow_regime, broker_flow). Entry/stop from risk range.</div>")
     st.markdown(CSS + html, unsafe_allow_html=True)
 
 def flow(d):
