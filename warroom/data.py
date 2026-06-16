@@ -17,6 +17,15 @@ US_NAMES = ["NVDA", "AMD", "AVGO", "MRVL", "SMH", "SOXX", "MU", "TSM", "INTC",
             "MP", "ATI", "MTRN", "KTOS",
             "MSFT", "GOOGL", "AMZN", "META", "ORCL", "NBIS", "CRM", "NOW",
             "AAPL", "ARKK", "XLE", "XLU", "XLP", "COPX"]
+def _dynamic_us():
+    import os, json
+    try:
+        d = json.load(open(os.path.join(os.path.dirname(__file__), "..", "data", "extended_universe.json")))
+        ks = list((d.get("tier_2_discovered") or {}).keys()) + list((d.get("tier_3_user_requested") or {}).keys())
+        return [k.upper() for k in ks if isinstance(k, str) and k.isalpha() and 1 <= len(k) <= 5 and k.upper() not in US_NAMES and k.upper() != "HYNIX"]
+    except Exception:
+        return []
+US_NAMES = US_NAMES + _dynamic_us()            # adaptive: merge engine-discovered tickers
 US_UNIVERSE = MACRO_PROXY + US_NAMES
 IDX_UNIVERSE = ["BBCA.JK", "BMRI.JK", "BBRI.JK", "BBNI.JK", "TLKM.JK", "ASII.JK", "BUMI.JK",
                 "ADRO.JK", "ANTM.JK", "MDKA.JK", "GOTO.JK", "AMMN.JK", "BREN.JK", "HUMI.JK"]

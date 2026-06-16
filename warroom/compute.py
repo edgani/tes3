@@ -58,10 +58,15 @@ def _regime(us, fred):
                     "g_month": round(float(getattr(r, "monthly_g", 0)), 2),
                     "i_month": round(float(getattr(r, "monthly_i", 0)), 2),
                     "source": "FRED · live" if proxy_share < 0.5 else "price-proxy (no FRED)",
-                    "flip": str(_try(lambda: r.flip_hazard(), "") or "")})
+                    "flip": ""})
         out["divergence"] = "divergent" if out["structural"] != out["monthly"] else "aligned"
+        out["struct_probs"] = dict(getattr(r, "structural_probs", {}) or {})
+        out["month_probs"] = dict(getattr(r, "monthly_probs", {}) or {})
+        fh = getattr(r, "flip_hazard", None)
+        out["flip_hazard"] = round(float(fh() if callable(fh) else (fh or 0)), 2)
     else:
         out.update(_proxy_quad(us))
+        out["struct_probs"], out["month_probs"], out["flip_hazard"] = {}, {}, 0.0
     above = tot = 0
     for t in D.US_NAMES:
         d = us.get(t)
@@ -133,66 +138,103 @@ def _methodology(us, quad):
 
 
 # ---------------- lenses ----------------
-def _us_lens(us, gex_names):
-    g = _try(lambda: __import__("engines.gex_engine", fromlist=["analyze_multi"]).analyze_multi(
-        gex_names, {t: us[t] for t in gex_names if us.get(t) is not None}, 20.0), {}) or {}
+def _verdict(setups):
+    L = sum(1 for s in setups if s["_dir"] == "Long"); S = sum(1 for s in setups if s["_dir"] == "Short")
+    if L > S: return "Risk-on", "grn"
+    if S > L: return "Risk-off", "red"
+    return "Mixed", "amb"
+
+
+def _setups(prices, bench_t=None, names=None, n=8):
+    bench = prices.get(bench_t) if bench_t else None
+    bm = (lambda k: _ret(bench["Close"], k)) if (bench is not None and len(bench) > 70) else (lambda k: 0.0)
     rows = []
-    for t, gg in (g.items() if isinstance(g, dict) else []):
-        if not isinstance(gg, dict):
+    for t in (names or list(prices)):
+        d = prices.get(t)
+        if d is None or len(d) < 80 or t == bench_t:
             continue
-        reg = gg.get("regime") or gg.get("gamma_regime") or gg.get("state") or "—"
-        num = next((f"{k} {gg[k]:,.0f}" for k in ("net_gex", "gex", "total_gex", "zero_gamma", "gamma_flip") if isinstance(gg.get(k), (int, float))), "")
-        rows.append({"ticker": t, "regime": reg, "metric": num})
-    return rows
+        c = d["Close"]
+        rs = _ret(c, 63) - bm(63); mom = _ret(c, 63)
+        sma20, sma50 = float(c.tail(20).mean()), float(c.tail(50).mean())
+        above50, trend = c.iloc[-1] / sma50 - 1, sma20 / sma50 - 1
+        form = "BULLISH" if (trend > 0 and above50 > 0) else "BEARISH" if (trend < 0 and above50 < 0) else "NEUTRAL"
+        direction = "Long" if (form == "BULLISH" and rs > 0) else "Short" if (form == "BEARISH" and rs < 0) else "Watch"
+        rr = _try(lambda: _rr(d, t))
+        if rr and isinstance(rr, dict) and "trade" in rr:
+            tl, th = rr["trade"]["lrr"], rr["trade"]["trr"]
+            nl, nh = rr.get("trend", {}).get("lrr"), rr.get("trend", {}).get("trr")
+        else:
+            p0 = float(c.iloc[-1]); tl, th = round(p0 * 0.985, 2), round(p0 * 1.015, 2); nl, nh = round(p0 * 0.95, 2), round(p0 * 1.05, 2)
+        px = round(float(c.iloc[-1]), 2)
+        tl = round(tl, 2); th = round(th, 2)
+        nl = round(nl, 2) if nl else None; nh = round(nh, 2) if nh else None
+        if direction == "Long":
+            stop = min(tl, round(px * 0.97, 2))
+            target = max(nh if nh else px, round(px * 1.06, 2))
+            entry = f"{stop}–{px}"
+        elif direction == "Short":
+            stop = max(th, round(px * 1.03, 2))
+            target = min(nl if nl else px, round(px * 0.94, 2))
+            entry = f"{px}–{stop}"
+        else:
+            stop, target, entry = None, None, f"{tl}–{th}"
+        strength = abs(rs) * 2.2 + abs(mom) + abs(above50) * 0.7
+        rows.append({"ticker": t, "_dir": direction, "px": px, "entry": entry, "stop": stop, "target": target,
+                     "rs": round(rs * 100, 1), "form": form, "score": round(max(strength, 0) * 10, 1)})
+    rows.sort(key=lambda x: (x["_dir"] != "Watch", x["score"]), reverse=True)
+    return rows[:n]
+
+
+def _us_gamma(us, names):
+    out = []
+    for t in names:
+        d = us.get(t)
+        if d is None or len(d) < 40:
+            continue
+        c = d["Close"]; rv = float(c.pct_change().tail(20).std() * (252 ** 0.5)); rv60 = float(c.pct_change().tail(60).std() * (252 ** 0.5))
+        sma20 = float(c.tail(20).mean()); px = float(c.iloc[-1])
+        regime = "short γ · amplify" if (px < sma20 and rv > rv60) else "long γ · pin" if (px > sma20 and rv < rv60) else "neutral γ"
+        out.append({"ticker": t, "regime": regime, "zero_g": round(sma20, 2), "px": round(px, 2), "rv": round(rv * 100, 0)})
+    return out
+
+
+def _us_lens(us):
+    names = [t for t in D.US_NAMES if us.get(t) is not None]
+    setups = _setups(us, "SPY", names, 8)
+    v, vc = _verdict(setups)
+    return {"setups": setups, "gamma": _us_gamma(us, [s["ticker"] for s in setups[:6]]), "verdict": v, "vcolor": vc}
 
 
 def _crypto_lens(cp):
-    rows = []
-    for t in cp:
-        d = cp.get(t)
-        if d is None or len(d) < 40:
-            continue
-        c = d["Close"]; trend = "up" if c.iloc[-1] > c.tail(30).mean() else "down"
-        rows.append({"ticker": t, "ret30": round(_ret(c, 30) * 100, 1), "trend": trend})
-    return rows
+    setups = _setups(cp, "BTC-USD", list(cp), 6)
+    v, vc = _verdict(setups)
+    return {"setups": setups, "verdict": v, "vcolor": vc}
 
 
 def _commo_lens(commo, us):
-    out = {}
-    dxy = us.get("UUP")
-    gld = commo.get("GLD")
+    setups = _setups(commo, "DBC", list(commo), 6)
+    dxy = us.get("UUP"); gld = commo.get("GLD")
     if gld is None:
         gld = us.get("GLD")
-    out["gold"] = _try(lambda: __import__("engines.fx_commodity_driver_engine", fromlist=["gold_bias"]).gold_bias(
+    gb = _try(lambda: __import__("engines.fx_commodity_driver_engine", fromlist=["gold_bias"]).gold_bias(
         ("up" if dxy is not None and dxy["Close"].iloc[-1] > dxy["Close"].tail(20).mean() else "down"),
         0.0, _ret(gld["Close"], 30) if gld is not None else 0.0, False), None)
-    rows = []
-    for t in commo:
-        d = commo.get(t)
-        if d is None or len(d) < 40:
-            continue
-        c = d["Close"]
-        rows.append({"ticker": t, "ret30": round(_ret(c, 30) * 100, 1),
-                     "trend": "up" if c.iloc[-1] > c.tail(30).mean() else "down"})
-    return {"rows": rows, "gold_bias": out.get("gold")}
+    if isinstance(gb, dict):
+        gb = gb.get("label") or gb.get("bias")
+    v, vc = _verdict(setups)
+    return {"setups": setups, "gold_bias": gb, "verdict": v, "vcolor": vc}
 
 
 def _fx_lens(fx):
-    rows = []
-    for t in fx:
-        d = fx.get(t)
-        if d is None or len(d) < 40:
-            continue
-        c = d["Close"]
-        rows.append({"ticker": t.replace("=X", "").replace("DX-Y.NYB", "DXY"),
-                     "ret30": round(_ret(c, 30) * 100, 1),
-                     "trend": "up" if c.iloc[-1] > c.tail(30).mean() else "down"})
-    return rows
+    setups = _setups(fx, "DX-Y.NYB", list(fx), 6)
+    for s in setups:
+        s["ticker"] = s["ticker"].replace("=X", "").replace("DX-Y.NYB", "DXY")
+    v, vc = _verdict(setups)
+    return {"setups": setups, "verdict": v, "vcolor": vc}
 
 
 def _idx_flow(idx):
     rows = []
-    congs = _try(lambda: json.load(open(os.path.join(_DATADIR, "ihsg_conglomerates.json"))), {})
     for t, df in (idx or {}).items():
         try:
             lf = lpm_features(df, scaling="value_typical", span=20)
@@ -201,8 +243,11 @@ def _idx_flow(idx):
             rows.append({"ticker": t, "state": lf.get("state"), "lpm": lf.get("lpm"), "adl_rising": rising})
         except Exception:
             continue
-    return rows
-
+    setups = _setups(idx, None, list(idx), 8)
+    acc = sum(1 for r in rows if r.get("state") == "accumulation")
+    v = ("Accumulation" if acc > len(rows) / 2 else "Distribution" if acc < len(rows) / 3 else "Mixed")
+    vc = "grn" if v == "Accumulation" else "red" if v == "Distribution" else "amb"
+    return {"rows": rows, "setups": setups, "verdict": v, "vcolor": vc}
 
 def _flow_rotation(us):
     buckets = {"Semis": "SMH", "Growth": "ARKK", "Energy": "XLE", "Utilities": "XLU",
@@ -248,7 +293,7 @@ def run(us, idx, crypto, fx, commo, fred=None):
         "regime": reg, "rows": rows,
         "scanned": len(D.US_NAMES), "conviction": rows[:4], "watchlist": rows[4:12],
         "methodology": _methodology(us, quad),
-        "us_lens": _us_lens(us, [t for t in ["NVDA", "SMH", "ANET", "VRT", "AAPL", "MSFT"] if us.get(t) is not None]),
+        "us_lens": _us_lens(us),
         "crypto": _crypto_lens(crypto), "commo": _commo_lens(commo, us), "fx": _fx_lens(fx),
         "idx": _idx_flow(idx), "flow": _flow_rotation(us), "funding": _funding(fred),
         "bottleneck": _bottleneck(us),

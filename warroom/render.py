@@ -102,6 +102,28 @@ def _conv_card(r, dmax, reg, extra=""):
             f"<span class='wr-score wr-mono'>{disp:.1f}</span></div><div class='wr-why'>{_causal5(r, reg)}</div>{szhtml}{extra}</div>")
 
 
+def _setup_card(s):
+    k = _DIRK.get(s["_dir"], "inf")
+    levels = (f"<span class='k'>entry</span> {s['entry']} · <span class='k'>stop</span> {s['stop']} · <span class='k'>target</span> {s['target']}"
+              if s["_dir"] in ("Long", "Short") else f"<span class='k'>watch zone</span> {s['entry']}")
+    return (f"<div class='wr-card'><div class='wr-ctop'>{_b(s['_dir'], k)}"
+            f"<span class='wr-tkr wr-mono'>{s['ticker']}</span><span class='wr-sub'>${s['px']}</span>"
+            f"<span class='wr-score wr-mono'>{s['score']:.1f}</span></div>"
+            f"<div class='wr-why'>{levels}. <span class='k'>RS</span> {s['rs']:+.0f}% · {s['form'].lower()}.</div></div>")
+
+
+def _probrow(probs):
+    if not probs:
+        return "<span class='wr-note'>quad probabilities need FRED (live on your machine).</span>"
+    order = ["Q1", "Q2", "Q3", "Q4"]; mx = max(probs.values()) or 1
+    cells = ""
+    for q in order:
+        p = probs.get(q, 0); w = int(100 * p / mx)
+        cells += (f"<div style='flex:1;'><div class='wr-tk'>{q} {p*100:.0f}%</div>"
+                  f"<div class='wr-bar'><div class='wr-barfill' style='width:{w}%;background:#6b7682;'></div></div></div>")
+    return f"<div style='display:flex;gap:10px;'>{cells}</div>"
+
+
 def command_center(d, source):
     reg = d["regime"]; fund = d.get("funding", {})
     gs, isr, b = reg["g_struct"], reg["i_struct"], reg["breadth"]
@@ -128,6 +150,11 @@ def command_center(d, source):
     state_html = (f"<div class='wr-lbl'>Regime state — HMM · forward · shock (engines)</div>"
                   f"<div class='wr-rows' style='margin-bottom:16px;'><div class='wr-row'>"
                   f"<span class='wr-why'>{' &nbsp;·&nbsp; '.join(bits)}</span></div></div>")
+    quad_html = (f"<div class='wr-lbl'>Quad path — next-quad probability (Hedgeye GIP)</div>"
+                 f"<div class='wr-card' style='margin-bottom:16px;'>"
+                 f"<div class='wr-tk' style='margin-bottom:6px;'>Structural</div>{_probrow(reg.get('struct_probs',{}))}"
+                 f"<div class='wr-tk' style='margin:12px 0 6px;'>Monthly</div>{_probrow(reg.get('month_probs',{}))}"
+                 f"<div class='wr-sub' style='margin-top:12px;'><span class='k' style='color:#6b7682;'>Flip hazard:</span> {reg.get('flip_hazard',0)*100:.0f}% chance of quad change</div></div>")
     # propagation chain (restored to CC)
     edges = d.get("bottleneck", {}).get("leadlag", [])
     if edges:
@@ -152,6 +179,7 @@ def command_center(d, source):
             f"<div style='flex:2;min-width:210px;' class='wr-sub'>{flip}</div></div></div>"
             f"<div class='wr-lbl'>Why — regime drivers (Hedgeye GIP: structural + monthly)</div><div class='wr-grid'>{drivers}</div>"
             f"{state_html}"
+            f"{quad_html}"
             f"<div class='wr-lbl'>What to do — highest conviction</div>{cards}"
             f"<div class='wr-lbl'>The edge — propagation</div><div class='wr-chain'>"
             f"<div style='display:flex;align-items:center;gap:6px;flex-wrap:wrap;'>{chain}</div>"
@@ -186,57 +214,55 @@ def _lens_rows(items, fmt):
 
 
 def us_stocks(d):
-    rows = _lens_rows(d.get("us_lens", []), lambda r: (
-        f"<div class='wr-row'><span class='wr-mono' style='font-weight:600;min-width:56px;color:#e8edf2;'>{r['ticker']}</span>"
-        f"<span class='wr-node n-src'>{r['regime']}</span><span class='wr-sub'>{r.get('metric','')}</span></div>"))
-    html = (f"<div class='wr-top'><b>US stocks</b><span>dealer gamma lens</span></div>"
-            f"<div class='wr-lbl'>Gamma regime per name (GEX engine)</div><div class='wr-rows'>{rows}</div>"
-            f"<div class='wr-note' style='margin-top:8px;'>Proxy GEX from price/vol. Real signed GEX/vanna/charm via options chain (engines/yfinance_options) — wire a feed.</div>")
+    L = d.get("us_lens", {}); setups = L.get("setups", []); gamma = L.get("gamma", [])
+    gtiles = "".join(_tile(g["ticker"], g["zero_g"], g["regime"], "red" if "short" in g["regime"] else "grn" if "long" in g["regime"] else "sub") for g in gamma)
+    cards = "".join(_setup_card(s) for s in setups) or "<div class='wr-note'>no setups.</div>"
+    html = (f"<div class='wr-top'><b>US stocks</b><span>gamma lens · actionable setups</span></div>"
+            f"<div style='margin-bottom:14px;'>{_b('US · ' + L.get('verdict','—'), L.get('vcolor','amb'))}</div>"
+            f"<div class='wr-lbl'>Dealer gamma (price-proxy · zero-γ level)</div><div class='wr-grid'>{gtiles}</div>"
+            f"<div class='wr-lbl'>Setups — entry / stop / target</div>{cards}"
+            f"<div class='wr-note'>Gamma = price/vol proxy (short γ → dealers amplify moves). Real signed GEX/vanna/charm via options chain (yfinance_options). Entry/stop/target from Hedgeye risk range.</div>")
+    st.markdown(CSS + html, unsafe_allow_html=True)
+
+
+def _lens_tab(d, key, title, sub, note):
+    L = d.get(key, {}); setups = L.get("setups", [])
+    cards = "".join(_setup_card(s) for s in setups) or "<div class='wr-note'>no setups in this universe.</div>"
+    extra = f"<div class='wr-note' style='margin:0 0 10px;'>Gold bias: {L['gold_bias']}.</div>" if L.get("gold_bias") else ""
+    html = (f"<div class='wr-top'><b>{title}</b><span>{sub}</span></div>"
+            f"<div style='margin-bottom:14px;'>{_b(title + ' · ' + L.get('verdict','—'), L.get('vcolor','amb'))}</div>"
+            f"{extra}<div class='wr-lbl'>Setups — entry / stop / target</div>{cards}"
+            f"<div class='wr-note'>{note}</div>")
     st.markdown(CSS + html, unsafe_allow_html=True)
 
 
 def crypto(d):
-    rows = _lens_rows(d.get("crypto", []), lambda r: (
-        f"<div class='wr-row'><span class='wr-mono' style='font-weight:600;min-width:74px;color:#e8edf2;'>{r['ticker']}</span>"
-        f"{_b(r['trend'], 'grn' if r['trend']=='up' else 'red')}<span class='wr-sub'>30d {r['ret30']:+.1f}%</span></div>"))
-    html = (f"<div class='wr-top'><b>Crypto</b><span>price + flow lens</span></div>"
-            f"<div class='wr-lbl'>Trend per asset</div><div class='wr-rows'>{rows}</div>"
-            f"<div class='wr-note' style='margin-top:8px;'>On-chain (netflow/MVRV), funding & liquidation heat need a feed (defillama/exchange). Engines present: gcfis/crypto, onchain.</div>")
-    st.markdown(CSS + html, unsafe_allow_html=True)
+    _lens_tab(d, "crypto", "Crypto", "price + flow lens",
+              "On-chain (netflow/MVRV), funding & liquidation heat need a feed (defillama/exchange). Setups from trend/RS + Hedgeye risk range.")
 
 
 def commodities(d):
-    c = d.get("commo", {}); rows = _lens_rows(c.get("rows", []), lambda r: (
-        f"<div class='wr-row'><span class='wr-mono' style='font-weight:600;min-width:56px;color:#e8edf2;'>{r['ticker']}</span>"
-        f"{_b(r['trend'], 'grn' if r['trend']=='up' else 'red')}<span class='wr-sub'>30d {r['ret30']:+.1f}%</span></div>"))
-    gb = c.get("gold_bias")
-    note = f"Gold bias: {gb}. " if gb else ""
-    html = (f"<div class='wr-top'><b>Commodities</b><span>trend · curve lens</span></div>"
-            f"<div class='wr-lbl'>Trend per commodity</div><div class='wr-rows'>{rows}</div>"
-            f"<div class='wr-note' style='margin-top:8px;'>{note}Curve shape / inventory / shipping need a futures feed. Engine: fx_commodity_driver.</div>")
-    st.markdown(CSS + html, unsafe_allow_html=True)
+    _lens_tab(d, "commo", "Commodities", "trend · curve lens",
+              "Curve shape / inventory / shipping need a futures feed. Setups from trend/RS + Hedgeye risk range.")
 
 
 def fx(d):
-    rows = _lens_rows(d.get("fx", []), lambda r: (
-        f"<div class='wr-row'><span class='wr-mono' style='font-weight:600;min-width:64px;color:#e8edf2;'>{r['ticker']}</span>"
-        f"{_b(r['trend'], 'grn' if r['trend']=='up' else 'red')}<span class='wr-sub'>30d {r['ret30']:+.1f}%</span></div>"))
-    html = (f"<div class='wr-top'><b>FX</b><span>USD · trend lens</span></div>"
-            f"<div class='wr-lbl'>Trend per pair</div><div class='wr-rows'>{rows}</div>"
-            f"<div class='wr-note' style='margin-top:8px;'>Carry / rate differentials need FRED rates (engine: fx_carry). DXY/pairs trend from price.</div>")
-    st.markdown(CSS + html, unsafe_allow_html=True)
+    _lens_tab(d, "fx", "FX", "USD · trend lens",
+              "Carry / rate differentials need FRED rates (engine: fx_carry). Setups from trend/RS + Hedgeye risk range.")
 
 
 def ihsg(d):
-    rows = _lens_rows(d.get("idx", []), lambda r: (
-        f"<div class='wr-row'><span class='wr-mono' style='font-weight:600;min-width:78px;color:#e8edf2;'>{r['ticker']}</span>"
-        f"{_b(r.get('state','n/a'), {'accumulation':'grn','distribution':'red'}.get(r.get('state'),'amb'))}"
-        f"<span class='wr-sub'>{'A/D ↑' if r.get('adl_rising') else 'A/D ↓'} · LPM {_fmt(r.get('lpm'),0)}</span></div>"))
-    html = (f"<div class='wr-top'><b>IHSG</b><span>BandarMetrics · value-based LPM (fixed)</span></div>"
-            f"<div class='wr-lbl'>Accumulation / distribution per name</div><div class='wr-rows'>{rows}</div>"
-            f"<div class='wr-note' style='margin-top:8px;'>LPM value-based (calibrate_lpm.py locks it). Foreign Flow / Corr_F / Par_F + flow regime (Foreign/Domestic/Operator/Decoupled) need IDX broker Type-F data. Engines: gcfis/flow_regime, broker_flow.</div>")
+    L = d.get("idx", {}); rows = L.get("rows", []); setups = L.get("setups", [])
+    lpm_rows = "".join(f"<div class='wr-row'><span class='wr-mono' style='font-weight:600;min-width:78px;color:#e8edf2;'>{r['ticker']}</span>"
+                       f"{_b(r.get('state','n/a'), {'accumulation':'grn','distribution':'red'}.get(r.get('state'),'amb'))}"
+                       f"<span class='wr-sub'>{'A/D ↑' if r.get('adl_rising') else 'A/D ↓'} · LPM {_fmt(r.get('lpm'),0)}</span></div>" for r in rows)
+    cards = "".join(_setup_card(s) for s in setups) or "<div class='wr-note'>no setups.</div>"
+    html = (f"<div class='wr-top'><b>IHSG</b><span>BandarMetrics · actionable setups</span></div>"
+            f"<div style='margin-bottom:14px;'>{_b('IHSG · ' + L.get('verdict','—'), L.get('vcolor','amb'))}</div>"
+            f"<div class='wr-lbl'>Accumulation / distribution (value-based LPM)</div><div class='wr-rows' style='margin-bottom:14px;'>{lpm_rows}</div>"
+            f"<div class='wr-lbl'>Setups — entry / stop / target</div>{cards}"
+            f"<div class='wr-note'>LPM value-based (calibrate_lpm.py). Foreign Flow / Corr_F / Par_F + flow regime need IDX broker Type-F data. Entry/stop from risk range.</div>")
     st.markdown(CSS + html, unsafe_allow_html=True)
-
 
 def flow(d):
     items = d.get("flow", [])
