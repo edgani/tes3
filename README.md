@@ -1,28 +1,31 @@
-# War Room — self-contained
+# War Room
 
-Design = the original mockups. Ranking/logic = mine. From the old zip ONLY quant formulas were
-re-implemented clean (Hedgeye RV risk range, GIP/quad acceleration, value-based LPM). No old UI,
-no old ticker-filter pipeline, no heavy deps.
+Verdict-first cross-asset intelligence. Design + ranking = mine; formula engines = your zip
+(Hedgeye GIP structural+monthly, Hedgeye Risk Range, GEX/greeks, methodology Citrini/Yves/Soros/
+Coatue/Druckenmiller, lead-lag Granger+TE, supply-chain-graph, value-based LPM). No old UI, no old
+ticker-filter pipeline.
 
 ## Run
-```bash
-pip install -r requirements.txt
-streamlit run app.py
-```
-yfinance live; synthetic fallback so it always renders (flagged in the header note).
+    pip install -r requirements.txt
+    python build_cache.py          # optional: bulk price cache (complete + fast). Re-run nightly.
+    streamlit run app.py
 
-## Files (all mine / clean)
-- app.py ............ Streamlit, mockup design, 6 tabs
-- data.py .......... yfinance + synthetic loader
-- regime.py ........ GIP/quad via cross-asset acceleration (price-implied)
-- risk_range.py .... Hedgeye RV risk range  width = basis · σ_daily · √n  (TRADE/TREND/TAIL)
-- ranking.py ....... competitive conviction (RS / momentum / formation / crowding / accumulation)
-- lpm.py ........... value-based Liquidity Pressure Model (fixed) + calibrate_lpm.py
-- funding_stress.py  EFFR/SOFR/RRP/reserves funding-stress score (FRED; deviation-based)
-- secular_map.py ... curated secular/supplier map from your attachments
+yfinance live; synthetic fallback so it always renders. FRED via fredgraph (no API key).
+
+## Structure
+    app.py                 entry (10 tabs)
+    build_cache.py         bulk/incremental price cache  ← complete-but-light data
+    warroom/               MY code
+      data.py  fred.py  compute.py  render.py  lpm.py  funding_stress.py  secular_map.py  calibrate_lpm.py
+    engines/               zip formula engines (kept)
+    gcfis/                 zip gcfis engines (kept)
+    data/                  JSON assets (bottleneck_reference, ihsg_conglomerates, …)
 
 ## Tabs
-Command Center · Alpha Center · US Stocks · IHSG Bandar · Market State · Bottleneck & Moonshot
+Command Center (dual-quad: Structural + Monthly + divergence, 5-part causal, propagation) ·
+Alpha Center · US Stocks (gamma) · Crypto · Commodities · FX · IHSG (LPM) · Flow (rotation) ·
+Bottleneck (lead-lag + supplier graph) · Market State
 
 ## Honest gaps (flagged, not faked)
-Dealer gamma (options feed), IDX foreign Type-F, crypto on-chain, FX/FRED rates — next once feeds wired.
+Global (50-country) quad not in this zip. Real signed GEX/vanna/charm, IDX foreign Type-F, crypto
+on-chain, FX/FRED rates, futures curve — need feeds; engines are present and wired to activate.
