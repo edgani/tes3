@@ -188,15 +188,23 @@ def _setups(prices, bench_t=None, names=None, n=8, long_only=False):
 
 
 def _us_gamma(us, names):
+    import re
+    clean = lambda s: re.sub(r"[^\x00-\x7F]+", "", str(s)).strip() if s is not None else "—"
+    vix = _vix(us)
+    closes = {t: us[t]["Close"] for t in us if us.get(t) is not None}
+    gp = _try(lambda: __import__("engines.greeks_proxy", fromlist=["GreeksProxy"]).GreeksProxy().analyze_multi(list(names), closes, vix, 0.0, "Q3"))
     out = []
     for t in names:
-        d = us.get(t)
-        if d is None or len(d) < 40:
-            continue
-        c = d["Close"]; rv = float(c.pct_change().tail(20).std() * (252 ** 0.5)); rv60 = float(c.pct_change().tail(60).std() * (252 ** 0.5))
-        sma20 = float(c.tail(20).mean()); px = float(c.iloc[-1])
-        regime = "short γ · amplify" if (px < sma20 and rv > rv60) else "long γ · pin" if (px > sma20 and rv < rv60) else "neutral γ"
-        out.append({"ticker": t, "regime": regime, "zero_g": round(sma20, 2), "px": round(px, 2), "rv": round(rv * 100, 0)})
+        g = (gp or {}).get(t) if isinstance(gp, dict) else None
+        d = us.get(t); c = d["Close"] if d is not None else None
+        if isinstance(g, dict) and g.get("ok"):
+            out.append({"ticker": t, "px": round(float(g.get("price", 0)), 2), "gamma": clean(g.get("gamma")),
+                        "vanna": clean(g.get("vanna")), "charm": clean(g.get("charm")),
+                        "composite": clean(g.get("composite")), "max_pain": g.get("max_pain"), "rv": g.get("rvol_20d")})
+        elif c is not None and len(c) > 40:
+            sma20 = float(c.tail(20).mean()); px = float(c.iloc[-1]); rv = float(c.pct_change().tail(20).std() * (252 ** 0.5))
+            out.append({"ticker": t, "px": round(px, 2), "gamma": ("short gamma" if px < sma20 else "long gamma"),
+                        "vanna": "—", "charm": "—", "composite": "—", "max_pain": round(sma20, 2), "rv": round(rv * 100, 0)})
     return out
 
 
@@ -214,8 +222,12 @@ def _crypto_lens(cp):
     if btc is not None and eth is not None:
         alt = _ret(eth["Close"], 30) + (_ret(sol["Close"], 30) if sol is not None else _ret(eth["Close"], 30))
         dom = round((_ret(btc["Close"], 30) * 2 - alt) * 100, 1)
+    vr = None
+    if btc is not None and len(btc) > 90:
+        rv = float(btc["Close"].pct_change().tail(20).std() * (252 ** 0.5)); rv90 = float(btc["Close"].pct_change().tail(90).std() * (252 ** 0.5))
+        vr = "elevated" if rv > rv90 else "compressed"
     v, vc = _verdict(setups)
-    return {"setups": setups, "btc_dom": dom, "verdict": v, "vcolor": vc}
+    return {"setups": setups, "btc_dom": dom, "vol_regime": vr, "verdict": v, "vcolor": vc}
 
 
 def _commo_lens(commo, us):
@@ -228,18 +240,21 @@ def _commo_lens(commo, us):
         0.0, _ret(gld["Close"], 30) if gld is not None else 0.0, False), None)
     if isinstance(gb, dict):
         gb = gb.get("label") or gb.get("bias")
+    dbc = commo.get("DBC")
+    ctrend = ("up" if dbc is not None and dbc["Close"].iloc[-1] > dbc["Close"].tail(50).mean() else "down") if dbc is not None else None
     v, vc = _verdict(setups)
-    return {"setups": setups, "gold_bias": gb, "verdict": v, "vcolor": vc}
+    return {"setups": setups, "gold_bias": gb, "complex_trend": ctrend, "verdict": v, "vcolor": vc}
 
 
 def _fx_lens(fx):
     dxy = fx.get("DX-Y.NYB")
     dt = ("rising" if dxy is not None and dxy["Close"].iloc[-1] > dxy["Close"].tail(50).mean() else "falling") if dxy is not None else None
+    dm = round(_ret(dxy["Close"], 21) * 100, 1) if dxy is not None else None
     setups = _setups(fx, "DX-Y.NYB", list(fx), 6)
     for s in setups:
         s["ticker"] = s["ticker"].replace("=X", "").replace("DX-Y.NYB", "DXY")
     v, vc = _verdict(setups)
-    return {"setups": setups, "dxy_trend": dt, "verdict": v, "vcolor": vc}
+    return {"setups": setups, "dxy_trend": dt, "dxy_mom": dm, "verdict": v, "vcolor": vc}
 
 
 def _idx_flow(idx):
@@ -340,6 +355,25 @@ def run(us, idx, crypto, fx, commo, fred=None):
         r["size"] = _sizing(10 * r["score"] / dmax, reg["structural"], vix)
     out["xasset"] = _xasset(us, commo)
     out["shock_prob"] = "elevated" if vix > 22 else "moderate" if vix > 17 else "low"
+    # walk-forward + Monte-Carlo 100x gatekeeper (anti-overfit) on conviction setups
+    allpx = {}
+    for dd in (us, idx, crypto, fx, commo):
+        for k, v in (dd or {}).items():
+            allpx.setdefault(k, v)
+    vset = {r["ticker"]: {"ticker": r["ticker"], "direction": r["_dir"], "entry": r["px"], "stop": r["stop"], "target": r["target"]}
+            for r in out["conviction"] if r["_dir"] in ("Long", "Short") and r["ticker"] in allpx}
+    gate = _try(lambda: __import__("engines.walkforward_backtest_engine", fromlist=["batch_gatekeeper"]).batch_gatekeeper(list(vset), allpx, vset, None)) or {}
+    if isinstance(gate, dict):
+        for r in out["conviction"]:
+            g = gate.get(r["ticker"])
+            if isinstance(g, dict):
+                r["gate"] = {"status": g.get("gate_status"), "score": g.get("combined_gate_score"),
+                             "wf": g.get("walkforward_score"), "mc": g.get("mc_score"),
+                             "stop_adj": g.get("optimal_stop_adj"), "target_adj": g.get("optimal_target_adj")}
+        out["validation"] = {"checked": len(vset),
+                             "passed": sum(1 for g in gate.values() if isinstance(g, dict) and g.get("gate_status") == "PASS")}
+    else:
+        out["validation"] = {"checked": 0, "passed": 0}
     # funding nudge
     if out["funding"].get("crash_nudge"):
         reg["posture"], reg["defensive"] = "Defensive", True
