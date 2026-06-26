@@ -21,8 +21,32 @@ def fetch_one(series_id, days=1500):
         return None
 
 def fetch(series_ids=None, days=1500):
-    ids = series_ids or (GIP_SERIES + LIQ_SERIES)
+    try:
+        from warroom.macro_data import series_ids as _macro_ids
+        from warroom.policy import series_ids as _policy_ids
+        macro = list(dict.fromkeys(_macro_ids() + _policy_ids()))
+    except Exception:
+        macro = []
+    # 1) robust loader from the repo: FRED API key -> fredgraph CSV -> DBnomics -> synthetic, parquet-cached
     out = {}
+    try:
+        from data.fred_loader import load_fred_bundle
+        b = load_fred_bundle()
+        series = (b or {}).get("series") if isinstance(b, dict) else None
+        if isinstance(series, dict):
+            out = {k: v for k, v in series.items() if v is not None and len(v) > 0}
+    except Exception:
+        pass
+    # 1b) ensure the FULL relevant-macro set is present — fetch any the loader missed
+    if out:
+        for sid in macro:
+            if sid not in out:
+                s = fetch_one(sid, days)
+                if s is not None and len(s):
+                    out[sid] = s
+        return out
+    # 2) fallback: anonymous fredgraph CSV (no key) for the full relevant set, de-duped
+    ids = series_ids or list(dict.fromkeys(GIP_SERIES + LIQ_SERIES + macro))
     for sid in ids:
         s = fetch_one(sid, days)
         if s is not None and len(s):

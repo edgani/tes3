@@ -28,12 +28,13 @@ def _fred(series_id, days=400):
         return None
 
 def _synth():
-    n = 120; idx = pd.bdate_range(end=pd.Timestamp.today(), periods=n)
-    eff = pd.Series(4.33 + np.cumsum(np.random.default_rng(1).normal(0, 0.004, n)), index=idx)
+    idx = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=120)
+    m = len(idx)
+    eff = pd.Series(4.33 + np.cumsum(np.random.default_rng(1).normal(0, 0.004, m)), index=idx)
     return {"effr": eff, "upper": pd.Series(4.50, index=idx), "sofr": eff - 0.02,
-            "rrp": pd.Series(np.linspace(400, 180, n), index=idx),
-            "reserves": pd.Series(np.linspace(3.3e6, 3.0e6, n), index=idx),
-            "tga": pd.Series(np.linspace(700, 820, n), index=idx)}
+            "rrp": pd.Series(np.linspace(400, 180, m), index=idx),
+            "reserves": pd.Series(np.linspace(3.3e6, 3.0e6, m), index=idx),
+            "tga": pd.Series(np.linspace(700, 820, m), index=idx)}
 
 def _last(s): return float(s.iloc[-1]) if s is not None and len(s) else np.nan
 def _ago(s, n): return float(s.iloc[-1 - n]) if s is not None and len(s) > n else np.nan

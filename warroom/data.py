@@ -8,7 +8,8 @@ import os, numpy as np, pandas as pd
 _CACHE = os.path.join(os.path.dirname(__file__), "..", "cache")
 
 # --- universes (macro proxies first; GIP/regime needs them) ---
-MACRO_PROXY = ["SPY", "IWM", "XLI", "XLY", "XHB", "USO", "GLD", "UUP", "TLT", "IEF", "DBC", "HYG", "^VIX"]
+MACRO_PROXY = ["SPY", "IWM", "XLI", "XLY", "XHB", "USO", "GLD", "UUP", "TLT", "IEF", "DBC", "HYG", "^VIX",
+               "XLK", "XLE", "XLF", "XLV", "XLP", "XLU", "XLB", "XLRE", "XLC", "IWD", "IWF", "MTUM"]
 # US: liquid leaders + the AI-buildout supply-chain beneficiaries (from the roadmap/12-layer attachments)
 US_NAMES = ["NVDA", "AMD", "AVGO", "MRVL", "SMH", "SOXX", "MU", "TSM", "INTC",
             "ANET", "COHR", "LITE", "FN", "CRDO", "ALAB", "AMKR", "GLW",
@@ -26,7 +27,13 @@ def _dynamic_us():
     except Exception:
         return []
 US_NAMES = US_NAMES + _dynamic_us()            # adaptive: merge engine-discovered tickers
-US_UNIVERSE = MACRO_PROXY + US_NAMES
+# cross-asset beta-play candidates (precious/miners, energy, copper, crypto-miners, nuclear) for the beta-play finder
+BETA_UNIVERSE = ["ACLS", "GDX", "GDXJ", "SIL", "FNV", "WPM", "NEM", "GOLD", "AEM",
+                 "XOP", "OIH", "SLB", "HAL", "AMLP", "FCX", "COPX", "SCCO",
+                 "MARA", "RIOT", "CLSK", "DNN", "NXE", "OKLO", "SMR"]
+# adjacent-theme names for the theme graph (quantum, robotics/automation, defense-tech)
+THEME_EXT = ["IONQ", "RGTI", "QBTS", "ARQQ", "TSLA", "ISRG", "ROK", "SERV", "PATH", "TER", "NNDM", "KTOS"]
+US_UNIVERSE = list(dict.fromkeys(MACRO_PROXY + US_NAMES + BETA_UNIVERSE + THEME_EXT))
 IDX_UNIVERSE = ["BBCA.JK", "BMRI.JK", "BBRI.JK", "BBNI.JK", "TLKM.JK", "ASII.JK", "BUMI.JK",
                 "ADRO.JK", "ANTM.JK", "MDKA.JK", "GOTO.JK", "AMMN.JK", "BREN.JK", "HUMI.JK"]
 CRYPTO_UNIVERSE = ["BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", "COIN", "IBIT", "MSTR"]
@@ -34,13 +41,14 @@ FX_UNIVERSE = ["DX-Y.NYB", "EURUSD=X", "USDJPY=X", "GBPUSD=X", "AUDUSD=X", "USDI
 COMMO_UNIVERSE = ["GLD", "SLV", "USO", "UNG", "CPER", "DBC", "WEAT", "URA"]
 
 def _synth(t, n=420):
+    idx = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=int(n))
+    m = len(idx)
     r = np.random.default_rng(abs(hash(t)) % (2**32))
-    rets = r.normal(r.uniform(-0.0008,0.0013), r.uniform(0.011,0.032), n)
-    c = 100*np.exp(np.cumsum(rets)); intr = np.abs(r.normal(0,0.018,n))*c; loc = r.uniform(.2,.8,n)
-    h = c+intr*(1-loc); l = c-intr*loc; o = l+(h-l)*r.uniform(.2,.8,n)
-    v = (r.uniform(1e6,6e7,n)*(1+np.abs(rets)/0.02*0.5)).round()
-    return pd.DataFrame({"Open":o,"High":h,"Low":l,"Close":c,"Volume":v},
-                        index=pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=n))
+    rets = r.normal(r.uniform(-0.0008, 0.0013), r.uniform(0.011, 0.032), m)
+    c = 100 * np.exp(np.cumsum(rets)); intr = np.abs(r.normal(0, 0.018, m)) * c; loc = r.uniform(.2, .8, m)
+    h = c + intr * (1 - loc); l = c - intr * loc; o = l + (h - l) * r.uniform(.2, .8, m)
+    v = (r.uniform(1e6, 6e7, m) * (1 + np.abs(rets) / 0.02 * 0.5)).round()
+    return pd.DataFrame({"Open": o, "High": h, "Low": l, "Close": c, "Volume": v}, index=idx)
 
 def _from_cache(tickers):
     out = {}

@@ -7,15 +7,44 @@ import os, json, numpy as np, pandas as pd
 from warroom import data as D
 from warroom.lpm import lpm_features, money_flow
 from warroom import funding_stress as FS
+from warroom import intervention as INT
+from warroom import timing as TIM
+from warroom import risk as RISK
+from warroom import mechanical as MECH
+from warroom import synthesis as SYN
+from warroom import crowd as CROWD
+from warroom import liquidity as LIQ
+from warroom import macro_data as MD
+from warroom import policy as POL
+from warroom import drivers as DRV
+from warroom import price_action as PA
+from warroom import structure as ST
+from warroom import rotation as ROT
+from warroom import beta_play as BP
+from warroom import themes as TH
 from warroom import secular_map as SEC
 
 _DATADIR = os.path.join(os.path.dirname(__file__), "..", "data")
+
+_DIAG = []  # observability: genuine exceptions (NOT no-signal None returns) collected per run
 
 
 def _try(fn, default=None):
     try:
         return fn()
-    except Exception:
+    except Exception as e:
+        try:
+            import re as _re, traceback as _tb
+            eng = ""
+            for ln in reversed(_tb.format_exc().splitlines()):
+                if any(p in ln for p in ("engines/", "gcfis/", "warroom/")):
+                    m = _re.search(r"([\w./-]+\.py)", ln)
+                    if m:
+                        eng = m.group(1).split("/")[-1]
+                        break
+            _DIAG.append({"engine": eng or type(e).__name__, "error": f"{type(e).__name__}: {str(e)[:120]}"})
+        except Exception:
+            _DIAG.append({"engine": "?", "error": str(e)[:120]})
         return default
 
 
@@ -64,6 +93,9 @@ def _regime(us, fred):
         out["month_probs"] = dict(getattr(r, "monthly_probs", {}) or {})
         fh = getattr(r, "flip_hazard", None)
         out["flip_hazard"] = round(float(fh() if callable(fh) else (fh or 0)), 2)
+        _cl = {t: us[t]["Close"] for t in us if us.get(t) is not None}
+        out["regime_transition"] = _try(lambda: __import__("engines.regime_transition_engine", fromlist=["run_regime_transition"]).run_regime_transition(r, _cl, fred))
+        out["change_detect"] = _try(lambda: __import__("gcfis.engines.change_detection", fromlist=["run_change_detection"]).run_change_detection({"spx": _cl.get("SPY")}, 60))
     else:
         out.update(_proxy_quad(us))
         out["struct_probs"], out["month_probs"], out["flip_hazard"] = {}, {}, 0.0
@@ -181,8 +213,12 @@ def _setups(prices, bench_t=None, names=None, n=8, long_only=False):
         else:
             stop, target, entry = None, None, f"{tl}–{th}"
         strength = abs(rs) * 2.2 + abs(mom) + abs(above50) * 0.7
+        conf = None
+        if isinstance(rr, dict) and "trade" in rr:
+            conf = _try(lambda: __import__("engines.confluence_engine", fromlist=["multi_tf_confluence"]).multi_tf_confluence(
+                rr.get("trade", {}).get("phase"), rr.get("trend", {}).get("phase"), rr.get("tail", {}).get("phase")))
         rows.append({"ticker": t, "_dir": direction, "px": px, "entry": entry, "stop": stop, "target": target,
-                     "rs": round(rs * 100, 1), "accel": round(acc * 100, 1), "form": form, "score": round(max(strength, 0) * 10, 1)})
+                     "rs": round(rs * 100, 1), "accel": round(acc * 100, 1), "form": form, "conf": conf, "score": round(max(strength, 0) * 10, 1)})
     rows.sort(key=lambda x: (x["_dir"] != "Watch", x["score"]), reverse=True)
     return rows[:n]
 
@@ -314,7 +350,8 @@ def _bottleneck(us):
 
 
 # ---------------- top-level ----------------
-def run(us, idx, crypto, fx, commo, fred=None):
+def run(us, idx, crypto, fx, commo, fred=None, feeds=None):
+    _DIAG.clear()
     reg = _regime(us, fred)
     rows = _rank(us, reg)
     quad = reg["structural"]
@@ -350,16 +387,107 @@ def run(us, idx, crypto, fx, commo, fred=None):
     out["ranked"] = len(pool)
     out["conviction"] = pool[:5]
     out["watchlist"] = pool[5:14]
-    dmax = max([r["score"] for r in out["conviction"]] or [1]) or 1
-    for r in out["conviction"]:
-        r["size"] = _sizing(10 * r["score"] / dmax, reg["structural"], vix)
-    out["xasset"] = _xasset(us, commo)
-    out["shock_prob"] = "elevated" if vix > 22 else "moderate" if vix > 17 else "low"
-    # walk-forward + Monte-Carlo 100x gatekeeper (anti-overfit) on conviction setups
     allpx = {}
     for dd in (us, idx, crypto, fx, commo):
         for k, v in (dd or {}).items():
             allpx.setdefault(k, v)
+    dmax = max([r["score"] for r in out["conviction"]] or [1]) or 1
+    for r in out["conviction"]:
+        disp01 = (10 * r["score"] / dmax) / 10.0
+        rrd = _try(lambda: _rr(allpx[r["ticker"]], r["ticker"])) if r["ticker"] in allpx else None
+        r["size"] = _sizing_full(r["ticker"], reg["structural"], vix, disp01, rrd)
+    out["xasset"] = _xasset(us, commo)
+    out["shock_prob"] = "elevated" if vix > 22 else "moderate" if vix > 17 else "low"
+    out["batch_a"] = _batch_a(us, commo, reg, vix, fred)
+    # complete relevant-macro chain + broken-link scanner (recession / K-shape)
+    _ind = _try(lambda: MD.compute(fred)) or []
+    out["macro"] = {"indicators": _ind,
+                    "broken_links": _try(lambda: MD.broken_links(_ind)) or [],
+                    "kshape": _try(lambda: MD.kshape_score(_ind))}
+    # Fed rate-path (market-implied) + inflation signal-vs-noise + bait detector
+    _oil = allpx.get("USO")
+    _oil_yoy = _try(lambda: (float(_oil["Close"].iloc[-1]) / float(_oil["Close"].iloc[-252]) - 1) * 100) if (_oil is not None and len(_oil) > 252) else None
+    _rinc = next((i["value"] for i in _ind if i["id"] == "DSPIC96"), None)
+    out["policy"] = _try(lambda: POL.synthesize(fred, _oil_yoy, (_rinc is not None and _rinc < 0)))
+    # cross-asset driver coherence (who's offside vs their mythic variable)
+    _drv = _try(lambda: DRV.compute(allpx, fred)) or []
+    out["drivers"] = {"assets": _drv, "summary": _try(lambda: DRV.coherence_summary(_drv)) or {}}
+    out["market_character"] = _try(lambda: PA.market_character(allpx, "SPY"))
+    out["rotation"] = _try(lambda: ROT.compute(allpx)) or {}
+    out["beta_plays"] = _try(lambda: BP.analyze_themes(allpx)) or {}
+    out["theme_graph"] = _try(lambda: TH.connect_dots(allpx)) or {}
+    # live feeds (from build_feeds.py snapshot) → fill feed-gated lens slots; empty = graceful proxy
+    feeds = feeds or {}
+    out["feeds_status"] = {k: (feeds.get(k) is not None) for k in ("fred", "fx_carry", "typef", "onchain", "cot", "gex", "finra")}
+    if feeds.get("fx_carry") is not None:
+        out["fx"]["carry"] = feeds["fx_carry"]
+    elif fred:
+        out["fx"]["carry"] = _try(lambda: __import__("engines.fx_carry_engine", fromlist=["analyze_fx_carry"]).analyze_fx_carry(fred, ["EURUSD", "USDJPY", "GBPUSD", "AUDUSD", "USDIDR"]))
+    if feeds.get("typef") is not None:
+        out["idx"]["typef"] = feeds["typef"]
+    if feeds.get("onchain") is not None:
+        out["crypto"]["onchain"] = feeds["onchain"]
+    if feeds.get("cot") is not None:
+        out["commo"]["cot"] = feeds["cot"]
+    if feeds.get("gex") is not None:
+        out["us_lens"]["gex_live"] = feeds["gex"]
+    if feeds.get("finra") is not None:
+        out["us_lens"]["finra"] = feeds["finra"]
+    # market-wide context for the decision brain
+    _vixs = _try(lambda: us["^VIX"]["Close"] if us.get("^VIX") is not None else None)
+    _me = _try(lambda: MECH.month_end_flow(allpx))
+    _vt = _try(lambda: MECH.vol_target_pressure(vix, _vixs))
+    out["mechanical"] = {"month_end": _me, "vol_target": _vt}
+    out["crowd_market"] = _try(lambda: CROWD.market_crowd(us))
+    _posture = "Risk-On" if str(reg.get("structural", "")).strip()[-1:] in ("1", "2") else "Risk-Off"
+    if reg.get("defensive"):
+        _posture = "Risk-Off / defensive"
+    _ctx = {"month_end": _me, "vol_target": _vt, "posture": _posture}
+
+    # per-instrument sensors (intervention, mechanical, timing, crowd, liquidity) → decision synthesis
+    _fr = out.get("batch_a", {}).get("frontrun") or {}
+    _frset = set((x.get("ticker") if isinstance(x, dict) else x) for x in (_fr.get("boarding_now") or [])) if isinstance(_fr, dict) else set()
+
+    def _tag(s, mk):
+        df = allpx.get(s["ticker"])
+        iv = _try(lambda: INT.assess(s["ticker"], df, mk, s.get("_dir")))
+        ev = _try(lambda: INT.event_tag(s["ticker"], mk))
+        if iv or ev:
+            s["intervention"] = iv or ev
+        mt = _try(lambda: MECH.rebalance_tag(s["ticker"], mk, None))
+        if mt:
+            s["mechanical"] = mt
+        if s.get("_dir") in ("Long", "Short") and s.get("target") is not None and df is not None:
+            rrd = _try(lambda: _rr(df, s["ticker"]))
+            tm = _try(lambda: TIM.assess(s["ticker"], df, s["_dir"], s.get("px"), s.get("stop"), s.get("target"), rrd, _frset))
+            if tm:
+                s["timing"] = tm
+        cr = _try(lambda: CROWD.name_crowd(df, s.get("_dir")))
+        if cr:
+            s["crowd"] = cr
+        lq = _try(lambda: LIQ.assess(s["ticker"], df))
+        if lq:
+            s["liquidity"] = lq
+        dec = _try(lambda: SYN.decide(s, _ctx))
+        if dec:
+            s["decision"] = dec
+        nc = _try(lambda: DRV.name_coherence(allpx, s["ticker"], mk))
+        if nc:
+            s["name_coh"] = nc
+        pa = _try(lambda: PA.read(df))
+        if pa:
+            s["pa"] = pa
+        stc = _try(lambda: ST.read(df))
+        if stc:
+            s["structure"] = stc
+
+    _mkt = {"us_lens": "US", "crypto": "Crypto", "commo": "Commodities", "fx": "FX", "idx": "IHSG"}
+    for _key, _mk in _mkt.items():
+        for s in (out.get(_key, {}).get("setups") or []):
+            _tag(s, _mk)
+    for s in out.get("conviction", []):
+        _tag(s, s.get("market", ""))
+    # walk-forward + Monte-Carlo 100x gatekeeper (anti-overfit) on conviction setups
     vset = {r["ticker"]: {"ticker": r["ticker"], "direction": r["_dir"], "entry": r["px"], "stop": r["stop"], "target": r["target"]}
             for r in out["conviction"] if r["_dir"] in ("Long", "Short") and r["ticker"] in allpx}
     gate = _try(lambda: __import__("engines.walkforward_backtest_engine", fromlist=["batch_gatekeeper"]).batch_gatekeeper(list(vset), allpx, vset, None)) or {}
@@ -377,6 +505,20 @@ def run(us, idx, crypto, fx, commo, fred=None):
     # funding nudge
     if out["funding"].get("crash_nudge"):
         reg["posture"], reg["defensive"] = "Defensive", True
+    # portfolio risk layer (conviction book)
+    out["risk"] = _try(lambda: RISK.portfolio(out.get("conviction", []), allpx)) or {"n": 0}
+    # data freshness
+    try:
+        import datetime as _dt
+        last = max((pd.to_datetime(df.index[-1]).date() for df in allpx.values() if df is not None and len(df)), default=None)
+        out["data_asof"] = {"date": str(last) if last else None, "stale_days": ((_dt.date.today() - last).days if last else None)}
+    except Exception:
+        out["data_asof"] = {"date": None, "stale_days": None}
+    # observability: engine exceptions this run (NOT no-signal None returns)
+    from collections import Counter as _Counter
+    out["diagnostics"] = {"failures": len(_DIAG),
+                          "by_engine": dict(_Counter(x["engine"] for x in _DIAG).most_common(12)),
+                          "samples": _DIAG[:10]}
     return out
 
 
@@ -463,3 +605,52 @@ def _xasset(us, commo):
             "oil": r(pick(commo.get("USO"), us.get("USO"))), "spx": r(us.get("SPY")),
             "dollar": r(us.get("UUP")), "bonds": r(us.get("TLT")), "vix": r(us.get("^VIX"))}
     return _try(lambda: __import__("gcfis.engines.cross_asset", fromlist=["run_cross_asset"]).run_cross_asset(snap))
+
+
+def _snap(us, commo):
+    def r(d, k=1):
+        return float(d["Close"].iloc[-1] / d["Close"].iloc[-1 - k] - 1) if d is not None and len(d) > k else 0.0
+    def pick(*dfs):
+        for x in dfs:
+            if x is not None:
+                return x
+        return None
+    return {"gold": r(pick(commo.get("GLD"), us.get("GLD"))), "silver": r(commo.get("SLV")),
+            "oil": r(pick(commo.get("USO"), us.get("USO"))), "spx": r(us.get("SPY")),
+            "dollar": r(us.get("UUP")), "bonds": r(us.get("TLT")), "vix": r(us.get("^VIX")),
+            "copper": r(us.get("COPX")), "hy": r(us.get("HYG"))}
+
+
+def _sizing_full(ticker, quad, vix, conviction01, rr_data):
+    """full Hedgeye sizing (VIX x Quad x Conviction x RR); fallback to vix-bucket."""
+    q = "Q" + str(quad)[-1]
+    res = _try(lambda: __import__("engines.hedgeye_position_sizing", fromlist=["calculate_position_size"]).calculate_position_size(
+        ticker, q, vix, conviction01, rr_data, None, False, 0.0))
+    if isinstance(res, dict):
+        for k in ("size_bps", "target_bps", "position_bps", "bps", "sized_bps"):
+            if res.get(k) is not None:
+                bps = round(float(res[k]))
+                if 5 <= bps <= 1500:
+                    return {"sized_bps": bps, "vix_bucket": res.get("vix_bucket") or res.get("bucket"), "engine": "hedgeye"}
+                break
+    return _sizing(conviction01 * 10, quad, vix)
+
+
+def _batch_a(us, commo, reg, vix, fred=None):
+    closes = {t: us[t]["Close"] for t in us if us.get(t) is not None}
+    q = "Q" + str(reg.get("structural", "Quad 3"))[-1]
+    snap = _snap(us, commo)
+    imp = lambda mod, fn: __import__(mod, fromlist=[fn])
+    o = {}
+    o["reflexivity"] = _try(lambda: imp("engines.reflexivity_engine", "run_reflexivity").run_reflexivity(closes, fred, q))
+    o["boombust"] = _try(lambda: imp("engines.boombust_engine", "classify_stage").classify_stage(closes, fred, None, q))
+    o["keith"] = _try(lambda: imp("engines.keith_signal_sync", "get_keith_summary").get_keith_summary())
+    o["coatue"] = _try(lambda: imp("engines.coatue_methodology", "run_coatue_scan").run_coatue_scan(list(closes)[:30], closes))
+    o["narrative"] = _try(lambda: imp("engines.narrative_engine", "generate_macro_narrative").generate_macro_narrative(snap))
+    o["scenarios"] = _try(lambda: imp("engines.narrative_engine", "generate_scenarios").generate_scenarios(snap))
+    o["transmission"] = _try(lambda: imp("engines.transmission_engine", "run_transmission").run_transmission(closes, q, 5.0))
+    o["cascade"] = _try(lambda: imp("engines.cascade_engine", "run_all_cascades").run_all_cascades(closes, None, None))
+    o["seasonality"] = _try(lambda: imp("engines.seasonality_engine", "compute_universe_seasonality").compute_universe_seasonality(closes))
+    o["cri"] = _try(lambda: imp("engines.cri_v2_engine", "CRIv2Engine").CRIv2Engine().batch(us))
+    o["frontrun"] = _try(lambda: imp("engines.frontrun_engine", "FrontRunEngine").FrontRunEngine().run(us))
+    return o
